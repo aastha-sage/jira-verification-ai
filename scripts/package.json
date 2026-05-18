@@ -1,0 +1,10 @@
+{
+  "name": "jira-verify-scripts",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "dependencies": {
+    "@octokit/rest": "^20.1.1",
+    "axios": "1.16.0"
+  }
+}

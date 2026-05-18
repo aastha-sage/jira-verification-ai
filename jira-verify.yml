@@ -1,0 +1,174 @@
+name: Jira Verify
+
+on:
+  # Manual trigger: post "/verify PROJ-123" or "/verify PROJ-456" as a PR comment
+  issue_comment:
+    types: [created]
+  # Auto trigger: fires only when a PR is opened or reopened (not on every push)
+  pull_request:
+    types: [opened, reopened]
+  # Manual dispatch: generate a requirements list from one or more Jira tickets + their linked tickets
+  workflow_dispatch:
+    inputs:
+      ticket_ids:
+        description: "Comma-separated Jira ticket IDs (e.g. PROJ-123,PROJ-456)"
+        required: true
+        type: string
+
+jobs:
+
+  # ── Comment-triggered verification ──────────────────────────────────────────
+  verify-comment:
+    name: Verify (comment trigger)
+    if: |
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '/verify')
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read        # read PR diff
+      pull-requests: write  # post comment back
+      issues: write         # read/write issue comments
+      models: read          # call GitHub Models API
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+        working-directory: .github/scripts
+
+      - name: Run verification
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          # GitHub Models API token
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_AC_FIELD: ${{ secrets.JIRA_AC_FIELD }}        # optional, e.g. customfield_10016
+          JIRA_PROJECT_PREFIXES: ${{ secrets.JIRA_PROJECT_PREFIXES }}   # e.g. PROJ1|PROJ2
+          PR_NUMBER: ${{ github.event.issue.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+        run: node .github/scripts/verify.js
+
+  # ── Auto-triggered verification on PR open / reopen ────────────────────────
+  verify-auto:
+    name: Verify (auto trigger)
+    if: github.event_name == 'pull_request'
+    concurrency:
+      group: jira-verify-auto-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read        # read PR diff
+      pull-requests: write  # post comment back
+      issues: write         # read/write issue comments
+      models: read          # call GitHub Models API
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract Jira ticket from branch name, PR title, or PR body
+        id: extract
+        env:
+          BRANCH: ${{ github.head_ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          JIRA_PROJECT_PREFIXES: ${{ secrets.JIRA_PROJECT_PREFIXES }}   # e.g. PROJ1|PROJ2
+        run: |
+          # Guard: if JIRA_PROJECT_PREFIXES is unset the regex degrades to ()-[0-9]{1,5}
+          # and matches bare numbers like "-9" from PR URLs — skip extraction in that case.
+          if [ -z "$JIRA_PROJECT_PREFIXES" ]; then
+            echo "JIRA_PROJECT_PREFIXES secret is not set — skipping ticket extraction."
+            TICKETS=''
+          else
+            # Collect ALL unique ticket IDs from branch name, PR title, and PR body
+            TICKETS=$(printf '%s\n%s\n%s' "$BRANCH" "$PR_TITLE" "$PR_BODY" \
+              | grep -oE "(${JIRA_PROJECT_PREFIXES})-[0-9]{1,5}" | sort -u | tr '\n' ',')
+            TICKETS="${TICKETS%,}"  # strip trailing comma
+          fi
+          echo "ticket_ids=$TICKETS" >> "$GITHUB_OUTPUT"
+          PR_NUM="${{ github.event.pull_request.number }}"
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          if [ -z "$TICKETS" ] && [ "${{ github.event_name }}" != 'workflow_dispatch' ]; then
+            echo "No Jira tickets found in branch name, PR title, or PR body — skipping auto-verification."
+          else
+            echo "Detected tickets: $TICKETS (PR #$PR_NUM)"
+          fi
+
+      - name: Setup Node.js
+        if: steps.extract.outputs.ticket_ids != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        if: steps.extract.outputs.ticket_ids != ''
+        run: npm install --ignore-scripts
+        working-directory: .github/scripts
+
+      - name: Run verification
+        if: steps.extract.outputs.ticket_ids != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          # GitHub Models API token
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_AC_FIELD: ${{ secrets.JIRA_AC_FIELD }}        # optional, e.g. customfield_10016
+          JIRA_PROJECT_PREFIXES: ${{ secrets.JIRA_PROJECT_PREFIXES }}   # e.g. PROJ1|PROJ2
+          PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          AUTO_TICKET_IDS: ${{ steps.extract.outputs.ticket_ids }}
+          COMMENT_BODY: ""
+          COMMENT_USER: ${{ github.event.pull_request.user.login }}
+        run: node .github/scripts/verify.js
+
+  # ── Manual dispatch: generate requirements from Jira ticket(s) + linked tickets ──
+  generate-requirements:
+    name: Generate Requirements
+    if: github.event_name == 'workflow_dispatch'
+
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read        # checkout
+      models: read          # call GitHub Models API
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+        working-directory: .github/scripts
+
+      - name: Generate requirements
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}          # GitHub Models API token
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_AC_FIELD: ${{ secrets.JIRA_AC_FIELD }}        # optional, e.g. customfield_10016
+          JIRA_PROJECT_PREFIXES: ${{ secrets.JIRA_PROJECT_PREFIXES }}   # e.g. PROJ1|PROJ2
+          TICKET_IDS: ${{ github.event.inputs.ticket_ids }}
+          GENERATE_REQUIREMENTS: "true"
+        run: node .github/scripts/verify.js
