@@ -33,7 +33,7 @@ Go to **Settings → Secrets and variables → Actions** in your repository and 
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `JIRA_BASE_URL` | ✅ Yes | Your Jira instance URL, e.g. `https://your-org.atlassian.net` |
+| `JIRA_BASE_URL` | ✅ Yes | Your Jira instance URL, e.g. `[https://jira.sage.com/]` |
 | `JIRA_API_TOKEN` | ✅ Yes | A Jira Personal Access Token (PAT). Generate one in Jira under **Profile → Personal Access Tokens**. |
 | `JIRA_EMAIL` | ✅ Yes | The email address of the Jira account that owns the PAT |
 | `JIRA_PROJECT_PREFIXES` | ✅ Yes | Pipe-separated list of your Jira project key prefixes, e.g. `PROJ1\|PROJ2` |
